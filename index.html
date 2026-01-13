@@ -26,6 +26,9 @@
         .btn-action { background-color: #27ae60; color: white; padding: 15px; font-size: 18px; width: 100%; margin-top: 20px; font-weight: bold;}
         .btn-action:disabled { background-color: #95a5a6; cursor: wait; }
         .options { margin-top: 20px; padding: 15px; background: #ecf0f1; border-radius: 6px; }
+        .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+        .field label { font-weight: bold; }
+        .text-input { padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 4px; font-size: 14px; }
         .radio-group label { display: block; margin-bottom: 10px; cursor: pointer; }
         #log { margin-top: 20px; font-family: monospace; font-size: 11px; background: #222; color: #0f0; padding: 10px; border-radius: 4px; height: 150px; overflow-y: auto; display: none; }
         .progress-container { margin-top: 15px; background-color: #ddd; border-radius: 4px; height: 20px; display: none; overflow: hidden; }
@@ -48,6 +51,10 @@
 
         <div class="options" id="optionsPanel" style="display:none;">
             <h3>Ausgabe-Optionen</h3>
+            <div class="field">
+                <label for="nameInput">Name</label>
+                <input id="nameInput" class="text-input" type="text" placeholder="z.B. Meeting">
+            </div>
             <div class="radio-group">
                 <label><input type="radio" name="outputMode" value="merge" checked> Zusammenfügen (Merge)</label>
                 <label><input type="radio" name="outputMode" value="zip"> Einzeldateien (ZIP)</label>
@@ -68,12 +75,38 @@
         let ffmpeg = null;
 
         const dropArea = document.querySelector('.upload-area');
+        const nameInput = document.getElementById('nameInput');
+        nameInput.dataset.user = "0";
+        nameInput.addEventListener('input', () => {
+            nameInput.dataset.user = nameInput.value.trim() ? "1" : "0";
+        });
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => dropArea.addEventListener(eventName, e => {e.preventDefault(); e.stopPropagation();}, false));
         dropArea.addEventListener('drop', (e) => handleFiles(e.dataTransfer.files));
 
         function handleFiles(files) {
             for (let file of files) if (file.name.toLowerCase().endsWith('.webm')) selectedFiles.push(file);
             renderList();
+        }
+
+        function inferNameFromFileName(fileName) {
+            const base = fileName.replace(/\.[^/.]+$/, "");
+            const parts = base.split("-");
+            if (parts.length >= 4 && parts[0]) return parts[0];
+            return base;
+        }
+
+        function updateDefaultName() {
+            if (nameInput.dataset.user === "1") return;
+            if (selectedFiles.length === 0) {
+                nameInput.value = "";
+                return;
+            }
+            const inferred = selectedFiles.map(f => inferNameFromFileName(f.name)).filter(Boolean);
+            nameInput.value = inferred[0] || "";
+        }
+
+        function sanitizeName(name) {
+            return name.replace(/[\\/:*?"<>|]+/g, "").trim();
         }
 
         function renderList() {
@@ -93,6 +126,7 @@
             const hasFiles = selectedFiles.length > 0;
             document.getElementById('optionsPanel').style.display = hasFiles ? 'block' : 'none';
             document.getElementById('convertBtn').style.display = hasFiles ? 'block' : 'none';
+            updateDefaultName();
         }
 
         function move(idx, dir) {
@@ -129,6 +163,8 @@
             const btn = document.getElementById('convertBtn');
             const pBar = document.getElementById('progressBar');
             const mode = document.querySelector('input[name="outputMode"]:checked').value;
+            const baseNameRaw = nameInput.value.trim();
+            const baseName = baseNameRaw ? sanitizeName(baseNameRaw) : "";
 
             btn.disabled = true;
             document.getElementById('progressContainer').style.display = 'block';
@@ -147,20 +183,27 @@
 
                 if (mode === 'zip') {
                     const zip = new JSZip();
+                    const nameCounts = {};
                     for (let i = 0; i < inputNames.length; i++) {
                         const outName = `track${i}.mp3`;
                         log(`Konvertiere ${selectedFiles[i].name}...`);
                         await ffmpeg.run('-i', inputNames[i], '-vn', '-acodec', 'libmp3lame', '-q:a', '2', outName);
-                        zip.file(selectedFiles[i].name.replace(/\.[^/.]+$/, "") + ".mp3", ffmpeg.FS('readFile', outName));
+                        const baseFromWebm = selectedFiles[i].name.replace(/\.[^/.]+$/, "");
+                        const base = sanitizeName(baseFromWebm) || `track${i + 1}`;
+                        nameCounts[base] = (nameCounts[base] || 0) + 1;
+                        const unique = nameCounts[base] === 1 ? base : `${base}-${nameCounts[base]}`;
+                        zip.file(unique + ".mp3", ffmpeg.FS('readFile', outName));
                         ffmpeg.FS('unlink', inputNames[i]); ffmpeg.FS('unlink', outName);
                         pBar.style.width = `${20 + ((i+1) / inputNames.length * 70)}%`;
                     }
-                    download(await zip.generateAsync({type:"blob"}), "mp3_sammlung.zip");
+                    const zipName = baseName ? `${baseName}.zip` : "mp3_sammlung.zip";
+                    download(await zip.generateAsync({type:"blob"}), zipName);
                 } else {
                     log("Merge Dateien...");
                     ffmpeg.FS('writeFile', 'list.txt', inputNames.map(n => `file '${n}'`).join('\n'));
                     await ffmpeg.run('-f', 'concat', '-safe', '0', '-i', 'list.txt', '-vn', '-acodec', 'libmp3lame', '-q:a', '2', 'output.mp3');
-                    download(new Blob([ffmpeg.FS('readFile', 'output.mp3').buffer], {type: 'audio/mp3'}), "audio_komplett.mp3");
+                    const outName = baseName ? `${baseName}.mp3` : "audio_komplett.mp3";
+                    download(new Blob([ffmpeg.FS('readFile', 'output.mp3').buffer], {type: 'audio/mp3'}), outName);
                     ffmpeg.FS('unlink', 'output.mp3'); ffmpeg.FS('unlink', 'list.txt');
                     inputNames.forEach(n => ffmpeg.FS('unlink', n));
                 }
